@@ -4,36 +4,43 @@ from werkzeug.security import check_password_hash
 from database import SessionLocal
 from models import APIKey
 import bcrypt
+from datetime import datetime, timedelta
 
-def require_api_key(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        api_key = request.headers.get("X-API-KEY")
-        if not api_key:
-            return jsonify({"error": "API key required"}), 401
+
+from flask import request, jsonify, g  # add g if you prefer
+
+def require_api_key(view_func):
+    @wraps(view_func)
+    def wrapped_view(*args, **kwargs):
+        key = request.headers.get("X-API-KEY")
+        print("🔐 Received API key:", key)
+
+        if not key:
+            return jsonify({"error": "Missing API key"}), 403
 
         db = SessionLocal()
-        valid = False
-        role = None
-        now = datetime.utcnow()
+        try:
+            key_entries = db.query(APIKey).filter_by(active=True).all()
+            for entry in key_entries:
+                if bcrypt.checkpw(key.encode(), entry.key_hash.encode()):
+                    if entry.expires_at < datetime.utcnow():
+                        return jsonify({"error": "API key expired"}), 403
 
-        for key_entry in db.query(APIKey).filter_by(active=True).all():
-            if key_entry.expires_at < now:
-                key_entry.active = False
-                db.commit()
-                continue
-            if bcrypt.checkpw(api_key.encode(), key_entry.key_hash.encode()):
-                valid = True
-                role = key_entry.user.role
-                break
+                    # ✅ Attach role to request object
+                    request.user_role = entry.role
+                    print("🎭 Role attached:", entry.role)
+                    return view_func(*args, **kwargs)
 
-        db.close()
-        if not valid:
-            return jsonify({"error": "Invalid or expired API key"}), 403
+            return jsonify({"error": "Invalid API key"}), 403
 
-        request.user_role = role
-        return f(*args, **kwargs)
-    return decorated
+        except Exception as e:
+            print("🔥 Decorator error:", str(e))
+            return jsonify({"error": f"Decorator error: {str(e)}"}), 500
+        finally:
+            db.close()
+    return wrapped_view
+
+
 
 
 def require_role(allowed_roles):
